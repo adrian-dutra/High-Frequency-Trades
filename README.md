@@ -49,42 +49,41 @@ Entrar no `psql` dentro do container:
 docker compose exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
 ```
 
-## Aplicar as migrations
+## Aplicar os scripts SQL organizados
 
-As migrations organizadas ficam em:
+Os scripts SQL estao organizados por tipo em `sql/`:
 
 ```text
-sql/migrations/
+sql/enums/
+sql/tables/
+sql/indexes/
+sql/seed/
+sql/procedures/
+sql/functions/
+sql/triggers/
+sql/validation/
 ```
 
-Para aplicar todas em ordem em um banco limpo:
+Para criar a estrutura principal em um banco vazio, aplique os arquivos nesta ordem:
 
 ```bash
-for f in sql/migrations/*.sql; do
+for f in \
+  sql/enums/*.sql \
+  sql/tables/*.sql \
+  sql/indexes/*.sql \
+  sql/seed/*.sql \
+  sql/procedures/*.sql \
+  sql/functions/*.sql \
+  sql/triggers/*.sql
+do
   echo "Aplicando $f"
   docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < "$f"
 done
 ```
-
-## Recriar o schema do zero
-
-Durante o desenvolvimento, se precisar apagar o schema atual e reaplicar tudo:
-
-```bash
-docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/00_drop.sql
-
-for f in sql/migrations/*.sql; do
-  echo "Aplicando $f"
-  docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < "$f"
-done
-```
-
-Atencao: `sql/00_drop.sql` remove o schema `public`. Use apenas em ambiente local
-de desenvolvimento.
 
 ## Validar a seed base
 
-Depois de aplicar as migrations, rode:
+Depois de aplicar os scripts SQL, rode:
 
 ```bash
 docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/validation/006_seed_base_validation.sql
