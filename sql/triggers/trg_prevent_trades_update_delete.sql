@@ -1,0 +1,6 @@
+DROP TRIGGER IF EXISTS trg_prevent_trades_update_delete ON trades;
+
+CREATE TRIGGER trg_prevent_trades_update_delete
+BEFORE UPDATE OR DELETE ON trades
+FOR EACH ROW
+EXECUTE FUNCTION trg_prevent_trades_changes_fn();
