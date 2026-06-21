@@ -1,4 +1,4 @@
-\echo 'Seed base totals'
+\echo 'Totais da seed base'
 
 SELECT 'assets' AS item, 5 AS expected_count, COUNT(*) AS actual_count
 FROM assets
@@ -18,7 +18,7 @@ WHERE movement_type = 'DEPOSIT'
   AND description = 'Initial seed deposit'
 ORDER BY item;
 
-\echo 'Duplicate wallets by user and asset. Expected: zero rows.'
+\echo 'Carteiras duplicadas por usuario e ativo. Esperado: zero linhas.'
 
 SELECT
     user_id,
@@ -29,7 +29,7 @@ GROUP BY user_id, asset_id
 HAVING COUNT(*) > 1
 ORDER BY user_id, asset_id;
 
-\echo 'Wallets with negative balances. Expected: zero rows.'
+\echo 'Carteiras com saldos negativos. Esperado: zero linhas.'
 
 SELECT
     wallet_id,
@@ -42,7 +42,7 @@ WHERE available_balance < 0
    OR locked_balance < 0
 ORDER BY wallet_id;
 
-\echo 'Positive wallets without initial deposit movement. Expected: zero rows.'
+\echo 'Carteiras positivas sem movimentacao inicial de deposito. Esperado: zero linhas.'
 
 SELECT
     wallets.wallet_id,
@@ -64,7 +64,7 @@ WHERE wallets.available_balance > 0
   )
 ORDER BY users.email, assets.symbol;
 
-\echo 'Available balance by asset'
+\echo 'Saldo disponivel por ativo'
 
 SELECT
     assets.symbol,
@@ -75,7 +75,7 @@ JOIN assets
 GROUP BY assets.symbol
 ORDER BY assets.symbol;
 
-\echo 'Seed users and wallet count by user'
+\echo 'Usuarios da seed e quantidade de carteiras por usuario'
 
 SELECT
     users.email,

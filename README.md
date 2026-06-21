@@ -2,13 +2,32 @@
 
 HFT Simulator - Order Book de Criptomoedas.
 
-Projeto academico para a disciplina de Laboratorio de Banco de Dados, usando
-PostgreSQL 15+ como banco obrigatorio.
+Projeto academico da disciplina de Laboratorio de Banco de Dados. O sistema usa
+PostgreSQL 15+ como nucleo da aplicacao para simular uma exchange simples de
+criptomoedas: usuarios possuem carteiras, criam ordens de compra e venda, o
+banco bloqueia saldo, executa matching, gera trades, audita alteracoes e mantem
+candles OHLCV de 1 minuto.
+
+## O que foi implementado
+
+- Schema relacional para usuarios, ativos, mercados, carteiras, ordens, trades,
+  movimentacoes de carteira, auditoria de ordens e candles.
+- ENUMs para lado da ordem, status da ordem e tipo de movimentacao de carteira.
+- Constraints, chaves primarias, chaves estrangeiras, checks e indices do order
+  book.
+- Procedures para deposito, criacao de ordem e cancelamento.
+- Matching automatico por trigger apos inserir ordem.
+- Imutabilidade de trades por trigger.
+- Atualizacao automatica de candles apos novos trades.
+- Views para resumo de mercado, historico de trades e ranking de traders.
+- Loader Python hibrido para gerar ordens reais e popular candles historicos em
+  massa ate atingir o tamanho alvo do banco.
 
 ## Requisitos
 
 - Docker
 - Docker Compose
+- Python 3.12+
 - Arquivo `.env` criado a partir de `.env.exemple`
 
 ## Configurar ambiente
@@ -19,9 +38,7 @@ Crie o arquivo `.env` local:
 cp .env.exemple .env
 ```
 
-Edite o valor de `POSTGRES_PASSWORD` no `.env` antes de subir o banco.
-
-Exemplo esperado:
+Edite os valores conforme o seu ambiente. Exemplo:
 
 ```env
 POSTGRES_HOST=localhost
@@ -31,75 +48,140 @@ POSTGRES_USER=hft_user
 POSTGRES_PASSWORD=change_me
 ```
 
-## Subir o banco
+## Subir o PostgreSQL
 
 ```bash
 docker compose up -d
 ```
 
-Verifique se o container esta saudavel:
+Confira se o container esta de pe:
 
 ```bash
 docker compose ps
 ```
 
-Entrar no `psql` dentro do container:
+O projeto usa o container `hft-postgres`. Para entrar no `psql`:
 
 ```bash
-docker compose exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+docker exec -it hft-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
 ```
 
-## Aplicar os scripts SQL organizados
+## Recriar o banco do zero
 
-Os scripts SQL estao organizados por tipo em `sql/`:
-
-```text
-sql/enums/
-sql/tables/
-sql/indexes/
-sql/seed/
-sql/procedures/
-sql/functions/
-sql/triggers/
-sql/validation/
-```
-
-Para criar a estrutura principal em um banco vazio, aplique os arquivos nesta ordem:
+Para limpar o schema `public`:
 
 ```bash
-for f in \
-  sql/enums/*.sql \
-  sql/tables/*.sql \
-  sql/indexes/*.sql \
-  sql/seed/*.sql \
-  sql/procedures/*.sql \
-  sql/functions/*.sql \
-  sql/triggers/*.sql
-do
-  echo "Aplicando $f"
-  docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < "$f"
+docker exec -i hft-postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/00_drop.sql
+```
+
+Depois aplique todos os scripts SQL organizados:
+
+```bash
+bash sql/apply_order.txt
+```
+
+O arquivo `sql/apply_order.txt` aplica os objetos na ordem correta:
+
+1. ENUMs
+2. tabelas
+3. indices
+4. seed base
+5. procedures
+6. functions
+7. triggers
+8. views
+
+## Validar o banco
+
+Depois de recriar o banco, rode as validacoes principais:
+
+```bash
+for f in sql/validation/*.sql; do
+  echo "Validando $f"
+  docker exec -i hft-postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < "$f"
 done
 ```
 
-## Validar a seed base
+## Preparar o Python
 
-Depois de aplicar os scripts SQL, rode:
+Crie e ative o ambiente virtual:
 
 ```bash
-docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < sql/validation/006_seed_base_validation.sql
+python -m venv .venv
+source .venv/bin/activate
 ```
 
-Essa validacao confere:
+Instale as dependencias:
 
-- total de assets;
-- total de markets;
+```bash
+pip install -r requirements.txt
+```
+
+## Rodar o loader
+
+O loader atual fica em `loader/load_data.py` e possui quatro modos:
+
+- `warmup`: garante usuarios, wallets e saldos iniciais altos;
+- `real-orders`: cria ordens reais usando `CALL sp_place_order`;
+- `bulk-candles`: popula candles historicos em massa usando `COPY`;
+- `full`: executa warmup, ordens reais e bulk-candles.
+
+Comando recomendado para carga completa:
+
+```bash
+python loader/load_data.py \
+  --mode full \
+  --target-db-mb 700 \
+  --real-orders 5000 \
+  --workers 4 \
+  --batch-size 1 \
+  --candle-markets 80
+```
+
+Para um teste pequeno antes da carga final:
+
+```bash
+python loader/load_data.py \
+  --mode full \
+  --target-db-mb 20 \
+  --real-orders 200 \
+  --workers 4 \
+  --batch-size 1 \
+  --candle-markets 5
+```
+
+Ao final, o loader imprime:
+
+- tamanho atual do banco;
 - total de usuarios;
-- total de wallets;
-- total de movimentacoes iniciais;
-- carteiras duplicadas;
-- saldos negativos;
-- wallets sem deposito inicial;
-- soma de saldo disponivel por asset.
+- total de mercados;
+- total de ordens;
+- total de trades;
+- total de candles;
+- total de movimentacoes de carteira;
+- total de auditorias de ordem;
+- tempo total de execucao.
+
+## Conferir tamanho e contagens
+
+```bash
+docker exec -it hft-postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+```
+
+Dentro do `psql`:
+
+```sql
+SELECT pg_size_pretty(pg_database_size(current_database()));
+
+SELECT
+  (SELECT COUNT(*) FROM users) AS users,
+  (SELECT COUNT(*) FROM markets) AS markets,
+  (SELECT COUNT(*) FROM orders) AS orders,
+  (SELECT COUNT(*) FROM trades) AS trades,
+  (SELECT COUNT(*) FROM candles_1m) AS candles,
+  (SELECT COUNT(*) FROM wallet_movements) AS wallet_movements,
+  (SELECT COUNT(*) FROM order_audit_log) AS order_audit_log;
+```
 
 ## Parar o banco
 

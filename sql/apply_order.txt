@@ -1,0 +1,35 @@
+for f in \
+sql/enums/001_enum_order_side.sql \
+sql/enums/002_enum_order_status.sql \
+sql/enums/003_enum_wallet_movement_type.sql \
+sql/tables/001_users.sql \
+sql/tables/002_assets.sql \
+sql/tables/003_markets.sql \
+sql/tables/004_wallets.sql \
+sql/tables/005_orders.sql \
+sql/tables/006_trades.sql \
+sql/tables/007_wallet_movements.sql \
+sql/tables/008_order_audit_log.sql \
+sql/tables/009_candles_1m_partitions.sql \
+sql/indexes/idx_order_book_and_history.sql \
+sql/seed/001_seed_base.sql \
+sql/procedures/sp_deposit.sql \
+sql/procedures/sp_place_order.sql \
+sql/procedures/sp_cancel_order.sql \
+sql/functions/trg_prevent_trades_changes_fn.sql \
+sql/triggers/trg_prevent_trades_update_delete.sql \
+sql/functions/fn_match_order.sql \
+sql/triggers/000_drop_trg_match_order_after_insert.sql \
+sql/functions/trg_match_order_after_insert_fn.sql \
+sql/triggers/trg_match_order_after_insert.sql \
+sql/functions/trg_update_candles_1m_after_trade_fn.sql \
+sql/triggers/trg_update_candles_1m_after_trade.sql \
+sql/functions/cancel_order.sql \
+sql/functions/get_best_orders.sql \
+sql/functions/user_portfolio.sql \
+sql/views/view_market_summary.sql \
+sql/views/view_trades_history.sql \
+sql/views/view_traders_ranking.sql
+do
+  docker exec -i hft-postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' < "$f"
+done
