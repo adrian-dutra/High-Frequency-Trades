@@ -15,7 +15,8 @@ class LoaderConfig:
     password: str = field(default_factory=lambda: os.getenv("POSTGRES_PASSWORD", ""))
     workers: int = field(default_factory=lambda: max(4, int(os.getenv("LOADER_WORKERS", "4"))))
     target_orders: int = field(default_factory=lambda: int(os.getenv("LOADER_TARGET_ORDERS", "100000")))
-    batch_size: int = field(default_factory=lambda: int(os.getenv("LOADER_BATCH_SIZE", "500")))
+    batch_size: int = field(default_factory=lambda: int(os.getenv("LOADER_BATCH_SIZE", "200")))
+    seed_users: int = field(default_factory=lambda: int(os.getenv("LOADER_SEED_USERS", "0")))
 
     @property
     def conninfo(self) -> str:

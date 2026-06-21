@@ -1,9 +1,8 @@
 import os
-import random
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal
 
 import psycopg
 
@@ -12,106 +11,95 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import load_config
 
 
-REFERENCE_PRICES = {
-    "BTC/USDT": Decimal("60000"),
-    "ETH/USDT": Decimal("3000"),
-    "SOL/USDT": Decimal("150"),
-}
+SUPPORTED_MARKETS = ("BTC/USDT", "ETH/USDT", "SOL/USDT")
 
-QUANTITY_RANGES = {
-    "BTC/USDT": (Decimal("0.0010"), Decimal("0.0200")),
-    "ETH/USDT": (Decimal("0.0100"), Decimal("0.2000")),
-    "SOL/USDT": (Decimal("0.5000"), Decimal("10.0000")),
-}
-
-WARMUP_DEPOSITS = {
+# Saldo inicial generoso por ativo. Mais usuarios = menos disputa de lock entre os
+# workers (cada ordem trava a carteira do dono via FOR UPDATE), entao o gargalo de
+# concorrencia some quando ha muitos usuarios disponiveis.
+SEED_BALANCES = {
     "USDT": Decimal("50000000"),
     "BTC": Decimal("500"),
     "ETH": Decimal("5000"),
     "SOL": Decimal("200000"),
 }
 
-PRICE_STEP = Decimal("0.01")
-QUANTITY_STEP = Decimal("0.0001")
+
+def tune_session(cur):
+    # Gerador de carga descartavel: nao precisamos esperar o fsync do WAL a cada
+    # commit, nem receber os NOTICE emitidos pelas procedures (puro overhead aqui).
+    cur.execute("SET synchronous_commit = OFF")
+    cur.execute("SET client_min_messages = WARNING")
+    # Sob concorrencia o matching gera deadlocks (cada ordem casada trava as carteiras
+    # dos dois lados). Detectar rapido + repetir (na sp_generate_orders) recupera em ms
+    # em vez do 1s padrao, mantendo a vazao alta.
+    cur.execute("SET deadlock_timeout = '10ms'")
 
 
-def quantize(value, step):
-    return value.quantize(step, rounding=ROUND_DOWN)
+def seed_load_users(conninfo, n_users):
+    # Cria usuarios sinteticos em massa (uma instrucao so, sem round-trip por usuario).
+    if n_users <= 0:
+        return
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            tune_session(cur)
+            cur.execute(
+                """
+                INSERT INTO users (name, email, is_active)
+                SELECT 'Loader User ' || g,
+                       'loader_' || g || '@example.com',
+                       true
+                FROM generate_series(1, %s) AS g
+                ON CONFLICT (email) DO NOTHING
+                """,
+                (n_users,),
+            )
+
+
+def ensure_balances(conninfo):
+    # Garante carteira com saldo alto para TODOS os usuarios ativos, set-based.
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        with conn.cursor() as cur:
+            tune_session(cur)
+            for symbol, amount in SEED_BALANCES.items():
+                cur.execute(
+                    """
+                    INSERT INTO wallets (user_id, asset_id, available_balance, locked_balance)
+                    SELECT u.user_id, a.asset_id, %s, 0
+                    FROM users u
+                    CROSS JOIN assets a
+                    WHERE u.is_active = true
+                      AND a.symbol = %s
+                    ON CONFLICT (user_id, asset_id) DO UPDATE
+                    SET available_balance = GREATEST(wallets.available_balance, EXCLUDED.available_balance)
+                    """,
+                    (amount, symbol),
+                )
 
 
 def fetch_targets(conninfo):
     with psycopg.connect(conninfo) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT user_id FROM users WHERE is_active = true ORDER BY user_id")
-            users = [row[0] for row in cur.fetchall()]
+            cur.execute("SELECT count(*) FROM users WHERE is_active = true")
+            users = cur.fetchone()[0]
             cur.execute("SELECT symbol FROM markets WHERE is_active = true ORDER BY market_id")
             markets = [row[0] for row in cur.fetchall()]
-    markets = [m for m in markets if m in REFERENCE_PRICES]
+    markets = [m for m in markets if m in SUPPORTED_MARKETS]
     return users, markets
 
 
-def warmup(conninfo, users):
-    with psycopg.connect(conninfo) as conn:
-        conn.autocommit = False
-        with conn.cursor() as cur:
-            for user_id in users:
-                for symbol, amount in WARMUP_DEPOSITS.items():
-                    cur.execute(
-                        "SAVEPOINT dep",
-                    )
-                    try:
-                        cur.execute(
-                            "CALL sp_deposit(%s, %s, %s, %s)",
-                            (user_id, symbol, amount, "Warmup loader"),
-                        )
-                        cur.execute("RELEASE SAVEPOINT dep")
-                    except psycopg.Error:
-                        cur.execute("ROLLBACK TO SAVEPOINT dep")
-                        cur.execute("RELEASE SAVEPOINT dep")
-            conn.commit()
-
-
-def build_order(markets):
-    market = random.choice(markets)
-    reference = REFERENCE_PRICES[market]
-    spread = Decimal(str(random.uniform(0.995, 1.005)))
-    price = quantize(reference * spread, PRICE_STEP)
-    qmin, qmax = QUANTITY_RANGES[market]
-    factor = Decimal(str(random.uniform(float(qmin), float(qmax))))
-    quantity = quantize(factor, QUANTITY_STEP)
-    if quantity < QUANTITY_STEP:
-        quantity = QUANTITY_STEP
-    side = "BUY" if random.random() < 0.5 else "SELL"
-    return market, side, price, quantity
-
-
 def run_worker(args):
-    conninfo, users, markets, order_count, batch_size, seed = args
-    random.seed(seed)
-    placed = 0
-    failed = 0
-    with psycopg.connect(conninfo) as conn:
-        conn.autocommit = False
+    conninfo, order_count, commit_every, seed = args
+    # autocommit=True e' obrigatorio: sp_generate_orders controla a transacao
+    # (COMMIT periodico), o que so e' permitido fora de um bloco transacional explicito.
+    with psycopg.connect(conninfo, autocommit=True) as conn:
         with conn.cursor() as cur:
-            for i in range(order_count):
-                user_id = random.choice(users)
-                market, side, price, quantity = build_order(markets)
-                cur.execute("SAVEPOINT ord")
-                try:
-                    cur.execute(
-                        "CALL sp_place_order(%s, %s, %s, %s, %s, NULL)",
-                        (user_id, market, side, price, quantity),
-                    )
-                    cur.execute("RELEASE SAVEPOINT ord")
-                    placed += 1
-                except psycopg.Error:
-                    cur.execute("ROLLBACK TO SAVEPOINT ord")
-                    cur.execute("RELEASE SAVEPOINT ord")
-                    failed += 1
-                if (i + 1) % batch_size == 0:
-                    conn.commit()
-            conn.commit()
-    return placed, failed
+            tune_session(cur)
+            cur.execute(
+                "CALL sp_generate_orders(%s, %s, %s, NULL, NULL)",
+                (order_count, seed, commit_every),
+            )
+            placed, failed = cur.fetchone()
+    return int(placed), int(failed)
 
 
 def split_counts(total, workers):
@@ -145,17 +133,19 @@ def main():
     config = load_config()
     conninfo = config.conninfo
 
+    seed_load_users(conninfo, config.seed_users)
+    ensure_balances(conninfo)
+
     users, markets = fetch_targets(conninfo)
     if not users:
         raise SystemExit("Nenhum usuario ativo encontrado. Aplique o seed antes do loader.")
     if not markets:
         raise SystemExit("Nenhum mercado suportado encontrado. Aplique o seed antes do loader.")
 
-    warmup(conninfo, users)
-
     counts = split_counts(config.target_orders, config.workers)
+    # setseed() exige um valor em (-1, 1); damos uma seed distinta por worker.
     tasks = [
-        (conninfo, users, markets, counts[i], config.batch_size, 1000 + i)
+        (conninfo, counts[i], config.batch_size, (i + 1) / (config.workers + 1))
         for i in range(config.workers)
     ]
 
